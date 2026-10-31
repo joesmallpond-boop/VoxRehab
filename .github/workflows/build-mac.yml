@@ -5,10 +5,16 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-14
     timeout-minutes: 60
+    env:
+      NAME: Vox Rehab
+      VERSION: 1.0.0
     steps:
       - uses: actions/checkout@v4
 
@@ -17,22 +23,29 @@ jobs:
 
       - name: Configure (universal arm64 + x86_64)
         run: |
+          set -o pipefail
+          mkdir -p ci-out
           cmake -B build-mac -G Xcode \
             -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13 2>&1 | tee ci-out/configure.log
 
       - name: Build VST3, AU, Standalone
         run: |
+          rc=0
           cmake --build build-mac --config Release \
-            --target VoxRehab_VST3 VoxRehab_AU VoxRehab_Standalone -- -quiet
+            --target VoxRehab_VST3 VoxRehab_AU VoxRehab_Standalone > ci-out/build-full.log 2>&1 || rc=$?
+          { grep -E "error:|BUILD (SUCCEEDED|FAILED)|\*\* " ci-out/build-full.log || true; echo "----- tail -----"; tail -n 150 ci-out/build-full.log; } > ci-out/build.log
+          rm ci-out/build-full.log
+          cat ci-out/build.log | tail -n 40
+          exit $rc
 
       - name: Package DMG
         run: |
-          set -e
-          NAME="Vox Rehab"; VERSION="1.0.0"
+          set -eo pipefail
+          exec > >(tee ci-out/package.log) 2>&1
           ART="build-mac/VoxRehab_artefacts/Release"
+          find build-mac/VoxRehab_artefacts -maxdepth 3
           VST3="$ART/VST3/$NAME.vst3"; AU="$ART/AU/$NAME.component"; APP="$ART/Standalone/$NAME.app"
-          ls -la "$ART" "$ART"/*
           for b in "$VST3" "$AU" "$APP"; do codesign --force --deep -s - "$b"; done
           lipo -info "$VST3/Contents/MacOS/$NAME"
           mkdir -p dist dmgsrc "pkgroot/Library/Audio/Plug-Ins/VST3" "pkgroot/Library/Audio/Plug-Ins/Components" "pkgroot/Applications"
@@ -49,19 +62,41 @@ jobs:
             --identifier com.joecaple.voxrehab --version "$VERSION" --install-location / \
             "dmgsrc/Install $NAME.pkg"
           cp README.md "dmgsrc/Read Me.md"
-          cat > "dmgsrc/If macOS blocks the installer.txt" <<'EOF'
-          This installer isn't signed with a paid Apple Developer ID, so macOS may say it
-          "can't be opened". To install:
-            1. Right-click (or Control-click) "Install Vox Rehab.pkg" and choose Open, then Open again.
-            or: System Settings > Privacy & Security > scroll down > "Open Anyway".
-          After installing, rescan plug-ins in your DAW.
-          (Logic: Settings > Plug-in Manager > Reset & Rescan Selection.)
-          EOF
+          printf '%s\n' \
+            "This installer is not signed with a paid Apple Developer ID, so macOS may say it can't be opened." \
+            "To install:" \
+            "  1. Right-click (or Control-click) 'Install Vox Rehab.pkg' and choose Open, then Open again." \
+            "  or: System Settings > Privacy & Security > scroll down > 'Open Anyway'." \
+            "After installing, rescan plug-ins in your DAW." \
+            "(Logic: Settings > Plug-in Manager > Reset & Rescan Selection.)" \
+            > "dmgsrc/If macOS blocks the installer.txt"
           hdiutil create -volname "$NAME $VERSION" -srcfolder dmgsrc -ov -format UDZO "dist/VoxRehab-$VERSION.dmg"
           ls -la dist
 
+      - name: Publish release
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete "v$VERSION" --yes --cleanup-tag || true
+          gh release create "v$VERSION" "dist/VoxRehab-$VERSION.dmg" \
+            --title "Vox Rehab $VERSION" \
+            --notes "Mac installer (VST3 + AU + Standalone, Apple Silicon + Intel). Not signed with an Apple Developer ID: right-click the .pkg and choose Open."
+
+      - name: Save logs + DMG to build-output branch
+        if: always()
+        run: |
+          mkdir -p out && cp -R ci-out/. out/ 2>/dev/null || true
+          cp dist/*.dmg out/ 2>/dev/null || true
+          echo "${{ job.status }} $(date -u)" > out/STATUS.txt
+          cd out
+          git init -q -b build-output
+          git config user.name "github-actions"; git config user.email "actions@github.com"
+          git add -A && git commit -q -m "build output ${{ github.sha }}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" build-output
+
       - uses: actions/upload-artifact@v4
+        if: success()
         with:
           name: VoxRehab-mac-dmg
           path: dist/*.dmg
-          if-no-files-found: error
