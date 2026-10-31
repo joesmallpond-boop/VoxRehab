@@ -1,0 +1,47 @@
+build-mac/VoxRehab_artefacts
+build-mac/VoxRehab_artefacts/JuceLibraryCode
+build-mac/VoxRehab_artefacts/JuceLibraryCode/VoxRehab_Standalone
+build-mac/VoxRehab_artefacts/JuceLibraryCode/VoxRehab_Standalone/Info.plist
+build-mac/VoxRehab_artefacts/JuceLibraryCode/VoxRehab_Standalone/PkgInfo
+build-mac/VoxRehab_artefacts/JuceLibraryCode/VoxRehab_AU.entitlements
+build-mac/VoxRehab_artefacts/JuceLibraryCode/Info.txt
+build-mac/VoxRehab_artefacts/JuceLibraryCode/RelWithDebInfo
+build-mac/VoxRehab_artefacts/JuceLibraryCode/RelWithDebInfo/Defs.txt
+build-mac/VoxRehab_artefacts/JuceLibraryCode/Release
+build-mac/VoxRehab_artefacts/JuceLibraryCode/Release/Defs.txt
+build-mac/VoxRehab_artefacts/JuceLibraryCode/VoxRehab_VST3.entitlements
+build-mac/VoxRehab_artefacts/JuceLibraryCode/VoxRehab_VST3
+build-mac/VoxRehab_artefacts/JuceLibraryCode/VoxRehab_VST3/Info.plist
+build-mac/VoxRehab_artefacts/JuceLibraryCode/VoxRehab_VST3/PkgInfo
+build-mac/VoxRehab_artefacts/JuceLibraryCode/VoxRehab_AU
+build-mac/VoxRehab_artefacts/JuceLibraryCode/VoxRehab_AU/Info.plist
+build-mac/VoxRehab_artefacts/JuceLibraryCode/VoxRehab_AU/PkgInfo
+build-mac/VoxRehab_artefacts/JuceLibraryCode/MinSizeRel
+build-mac/VoxRehab_artefacts/JuceLibraryCode/MinSizeRel/Defs.txt
+build-mac/VoxRehab_artefacts/JuceLibraryCode/VoxRehab_Standalone.entitlements
+build-mac/VoxRehab_artefacts/JuceLibraryCode/Debug
+build-mac/VoxRehab_artefacts/JuceLibraryCode/Debug/Defs.txt
+build-mac/VoxRehab_artefacts/Release
+build-mac/VoxRehab_artefacts/Release/libVox Rehab_SharedCode.a
+build-mac/VoxRehab_artefacts/Release/VST3
+build-mac/VoxRehab_artefacts/Release/VST3/Vox Rehab.vst3
+build-mac/VoxRehab_artefacts/Release/Standalone
+build-mac/VoxRehab_artefacts/Release/Standalone/Vox Rehab.app
+build-mac/VoxRehab_artefacts/Release/AU
+build-mac/VoxRehab_artefacts/Release/AU/Vox Rehab.component
+build-mac/VoxRehab_artefacts/Release/VST3/Vox Rehab.vst3: replacing existing signature
+build-mac/VoxRehab_artefacts/Release/AU/Vox Rehab.component: replacing existing signature
+build-mac/VoxRehab_artefacts/Release/Standalone/Vox Rehab.app: replacing existing signature
+Architectures in the fat file: build-mac/VoxRehab_artefacts/Release/VST3/Vox Rehab.vst3/Contents/MacOS/Vox Rehab are: x86_64 arm64 
+pkgbuild: Inferring bundle components from contents of pkgroot
+pkgbuild: Writing new component property list to components.plist
+pkgbuild: Reading components from components.plist
+pkgbuild: Adding component at Applications/Vox Rehab.app
+pkgbuild: Adding component at Library/Audio/Plug-Ins/Components/Vox Rehab.component
+pkgbuild: Adding component at Library/Audio/Plug-Ins/VST3/Vox Rehab.vst3
+pkgbuild: Wrote package to dmgsrc/Install Vox Rehab.pkg
+created: /Users/runner/work/VoxRehab/VoxRehab/dist/VoxRehab-1.1.0.dmg
+total 21264
+drwxr-xr-x   3 runner  staff        96 Oct 31 02:17 .
+drwxr-xr-x  18 runner  staff       576 Oct 31 02:17 ..
+-rw-r--r--@  1 runner  staff  10885734 Oct 31 02:17 VoxRehab-1.1.0.dmg
