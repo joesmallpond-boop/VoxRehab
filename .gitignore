@@ -1,0 +1,7 @@
+build/
+build-mac/
+JUCE/
+dist/
+pkgroot/
+dmgsrc/
+.DS_Store

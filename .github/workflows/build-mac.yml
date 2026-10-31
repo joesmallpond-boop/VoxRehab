@@ -1,0 +1,67 @@
+name: Build Mac DMG
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch JUCE 8.0.4
+        run: git clone --depth 1 --branch 8.0.4 https://github.com/juce-framework/JUCE.git JUCE
+
+      - name: Configure (universal arm64 + x86_64)
+        run: |
+          cmake -B build-mac -G Xcode \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13
+
+      - name: Build VST3, AU, Standalone
+        run: |
+          cmake --build build-mac --config Release \
+            --target VoxRehab_VST3 VoxRehab_AU VoxRehab_Standalone -- -quiet
+
+      - name: Package DMG
+        run: |
+          set -e
+          NAME="Vox Rehab"; VERSION="1.0.0"
+          ART="build-mac/VoxRehab_artefacts/Release"
+          VST3="$ART/VST3/$NAME.vst3"; AU="$ART/AU/$NAME.component"; APP="$ART/Standalone/$NAME.app"
+          ls -la "$ART" "$ART"/*
+          for b in "$VST3" "$AU" "$APP"; do codesign --force --deep -s - "$b"; done
+          lipo -info "$VST3/Contents/MacOS/$NAME"
+          mkdir -p dist dmgsrc "pkgroot/Library/Audio/Plug-Ins/VST3" "pkgroot/Library/Audio/Plug-Ins/Components" "pkgroot/Applications"
+          cp -R "$VST3" "pkgroot/Library/Audio/Plug-Ins/VST3/"
+          cp -R "$AU"   "pkgroot/Library/Audio/Plug-Ins/Components/"
+          cp -R "$APP"  "pkgroot/Applications/"
+          pkgbuild --analyze --root pkgroot components.plist
+          i=0
+          while /usr/libexec/PlistBuddy -c "Print :$i" components.plist >/dev/null 2>&1; do
+            /usr/libexec/PlistBuddy -c "Set :$i:BundleIsRelocatable false" components.plist
+            i=$((i+1))
+          done
+          pkgbuild --root pkgroot --component-plist components.plist \
+            --identifier com.joecaple.voxrehab --version "$VERSION" --install-location / \
+            "dmgsrc/Install $NAME.pkg"
+          cp README.md "dmgsrc/Read Me.md"
+          cat > "dmgsrc/If macOS blocks the installer.txt" <<'EOF'
+          This installer isn't signed with a paid Apple Developer ID, so macOS may say it
+          "can't be opened". To install:
+            1. Right-click (or Control-click) "Install Vox Rehab.pkg" and choose Open, then Open again.
+            or: System Settings > Privacy & Security > scroll down > "Open Anyway".
+          After installing, rescan plug-ins in your DAW.
+          (Logic: Settings > Plug-in Manager > Reset & Rescan Selection.)
+          EOF
+          hdiutil create -volname "$NAME $VERSION" -srcfolder dmgsrc -ov -format UDZO "dist/VoxRehab-$VERSION.dmg"
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VoxRehab-mac-dmg
+          path: dist/*.dmg
+          if-no-files-found: error
