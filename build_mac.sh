@@ -55,7 +55,8 @@ pkgbuild --analyze --root pkgroot dist/components.plist >/dev/null
 # keep bundles where we put them (don't let the installer "relocate" them)
 i=0
 while /usr/libexec/PlistBuddy -c "Print :$i" dist/components.plist >/dev/null 2>&1; do
-  /usr/libexec/PlistBuddy -c "Set :$i:BundleIsRelocatable false" dist/components.plist
+  /usr/libexec/PlistBuddy -c "Delete :$i:BundleIsRelocatable" dist/components.plist >/dev/null 2>&1 || true
+  /usr/libexec/PlistBuddy -c "Add :$i:BundleIsRelocatable bool false" dist/components.plist
   i=$((i+1))
 done
 pkgbuild --root pkgroot --component-plist dist/components.plist \
