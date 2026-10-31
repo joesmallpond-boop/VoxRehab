@@ -19,6 +19,12 @@ inline float msCoef (float ms, double fs) noexcept
     return ms <= 0.0f ? 0.0f : (float) std::exp (-1.0 / ((double) ms * 0.001 * fs));
 }
 inline int nextPow2 (int v) { int p = 1; while (p < v) p <<= 1; return p; }
+// one-pole glide that lands exactly on the target (so settled controls are bit-exact)
+inline float glideTo (float cur, float target, float coef) noexcept
+{
+    const float v = target + (cur - target) * coef;
+    return std::abs (v - target) < 1.0e-6f * std::max (1.0f, std::abs (target)) ? target : v;
+}
 
 //==============================================================================
 struct Biquad
@@ -70,7 +76,8 @@ struct Biquad
 // a shelf or bell at 0 dB is an exact identity (m0=1, m1=m2=0).
 enum EqType { Bell = 0, LowShelf, HighShelf, LowCut, HighCut, Notch };
 
-struct SvfCoefs { float g = 0, k = 1, a1 = 1, a2 = 0, a3 = 0, m0 = 1, m1 = 0, m2 = 0; };
+// double-precision coefficients + state: clean low-frequency filtering even at 192 kHz
+struct SvfCoefs { double g = 0, k = 1, a1 = 1, a2 = 0, a3 = 0, m0 = 1, m1 = 0, m2 = 0; };
 
 inline SvfCoefs makeSvf (int type, double fs, double f, double gainDb, double q)
 {
@@ -89,11 +96,11 @@ inline SvfCoefs makeSvf (int type, double fs, double f, double gainDb, double q)
         default: break;
     }
     SvfCoefs c;
-    c.g = (float) g; c.k = (float) k;
-    c.a1 = (float) (1.0 / (1.0 + g * (g + k)));
-    c.a2 = (float) (g * c.a1);
-    c.a3 = (float) (g * c.a2);
-    c.m0 = (float) m0; c.m1 = (float) m1; c.m2 = (float) m2;
+    c.g = g; c.k = k;
+    c.a1 = (1.0 / (1.0 + g * (g + k)));
+    c.a2 = (g * c.a1);
+    c.a3 = (g * c.a2);
+    c.m0 = m0; c.m1 = m1; c.m2 = m2;
     return c;
 }
 
@@ -116,15 +123,16 @@ inline double svfMagnitude (const SvfCoefs& c, double fs, double f)
 
 struct SvfState
 {
-    float ic1 = 0, ic2 = 0;
-    inline float tick (const SvfCoefs& c, float v0) noexcept
+    double ic1 = 0, ic2 = 0;
+    inline float tick (const SvfCoefs& c, float in) noexcept
     {
-        const float v3 = v0 - ic2;
-        const float v1 = c.a1 * ic1 + c.a2 * v3;
-        const float v2 = ic2 + c.a2 * ic1 + c.a3 * v3;
+        const double v0 = in;
+        const double v3 = v0 - ic2;
+        const double v1 = c.a1 * ic1 + c.a2 * v3;
+        const double v2 = ic2 + c.a2 * ic1 + c.a3 * v3;
         ic1 = 2 * v1 - ic1;
         ic2 = 2 * v2 - ic2;
-        return c.m0 * v0 + c.m1 * v1 + c.m2 * v2;
+        return (float) (c.m0 * v0 + c.m1 * v1 + c.m2 * v2);
     }
 };
 
@@ -253,7 +261,7 @@ public:
         ch.assign ((size_t) maxCh, {});
         for (auto& c : ch)
         {
-            c.low.assign ((size_t) R, 0.0f); c.high.assign ((size_t) R, 0.0f);
+            c.low.assign ((size_t) R, 0.0f); c.high.assign ((size_t) R, 0.0f); c.x.assign ((size_t) R, 0.0f);
             c.a.assign ((size_t) R, 0.0f);  c.g.assign ((size_t) R, 1.0f);
             c.blocks.fill (0.0f);
         }
@@ -281,7 +289,7 @@ public:
                 const float x = data[c][i];
                 const float lo = s.lp.process (x);
                 const float hp = x - lo;
-                s.low[(size_t) hi] = lo; s.high[(size_t) hi] = hp;
+                s.low[(size_t) hi] = lo; s.high[(size_t) hi] = hp; s.x[(size_t) hi] = x;
                 const float d2 = std::abs (hp - 2.0f * s.h1 + s.h2);
                 s.h2 = s.h1; s.h1 = hp;
                 s.a[(size_t) hi] = d2;
@@ -318,7 +326,9 @@ public:
                 if (t >= 0)
                 {
                     const int ti = (int) (t & mask);
-                    out = s.low[(size_t) ti] + s.high[(size_t) ti] * s.g[(size_t) ti];
+                    const float gv = s.g[(size_t) ti];
+                    // exact pass-through unless a repair is active on this sample
+                    out = gv >= 1.0f ? s.x[(size_t) ti] : s.low[(size_t) ti] + s.high[(size_t) ti] * gv;
                     s.minG = std::min (s.minG, s.g[(size_t) ti]);
                     s.g[(size_t) ti] = 1.0f;
                 }
@@ -338,7 +348,7 @@ private:
     struct Chan
     {
         Biquad lp;
-        std::vector<float> low, high, a, g;
+        std::vector<float> low, high, x, a, g;
         std::array<float, 8> blocks {};      // 8 x 2.5 ms block maxima = 20 ms of history
         float cur = 0, h1 = 0, h2 = 0, minG = 1.0f;
         int blockPos = 0, blockIdx = 0, cooldown = 0;
@@ -383,16 +393,32 @@ public:
     }
     int getLatency() const { return D; }
 
-    void process (float* const* data, int nch, int n, bool on, float sens01, float freq, float depthDb, float releaseMs)
+    // Q of a band-pass / bell spanning `oct` octaves
+    static double qForWidth (double oct) { const double b = std::pow (2.0, oct); return std::sqrt (b) / (b - 1.0); }
+
+    // bandMode = false: duck everything below `freq` (low shelf)
+    // bandMode = true:  duck only the band centred on `freq`, `widthOct` octaves wide (bell)
+    void process (float* const* data, int nch, int n, bool on, float sens01, float freq, float depthDb, float releaseMs,
+                  bool bandMode = false, float widthOct = 1.0f)
     {
-        if (freq != lastF)
+        if (freq != lastF || bandMode != lastBand || widthOct != lastW)
         {
+            const double q = qForWidth (widthOct);
+            const double ref = std::min (0.4 * fs, freq * std::pow (2.0, 0.5 * widthOct) * 1.25);
             for (auto& c : ch)
             {
-                c.a.setLowpass (fs, freq, 0.70710678); c.b.setLowpass (fs, freq, 0.70710678);
-                c.ha.setHighpass (fs, freq, 0.70710678); c.hb.setHighpass (fs, freq, 0.70710678);
+                if (bandMode)
+                {
+                    c.a.setBandpass (fs, freq, q); c.b.setBandpass (fs, freq, q);
+                    c.ha.setHighpass (fs, ref, 0.70710678); c.hb.setHighpass (fs, ref, 0.70710678);
+                }
+                else
+                {
+                    c.a.setLowpass (fs, freq, 0.70710678); c.b.setLowpass (fs, freq, 0.70710678);
+                    c.ha.setHighpass (fs, freq, 0.70710678); c.hb.setHighpass (fs, freq, 0.70710678);
+                }
             }
-            lastF = freq; lastDb = 1.0e9f;
+            lastF = freq; lastBand = bandMode; lastW = widthOct; lastDb = 1.0e9f;
         }
         const float rThr = 2.5f * std::pow (0.1f, sens01);   // sens 50 -> 0.79
         float maxLow = 0, maxHigh = 0;
@@ -421,7 +447,10 @@ public:
             if (on && envL > 0.003f)
             {
                 const float r = envL / (envR + 1.0e-6f);
-                const float amt = std::clamp (std::log (r / rThr) / std::log (2.0f), 0.0f, 1.0f);
+                // a voice naturally has energy in a mid band, so Band mode needs a higher ratio to call it a pop
+                const float thr = lastBand ? rThr * bandThrScale : rThr;
+                maxRatio = std::max (maxRatio, r);
+                const float amt = std::clamp (std::log (r / thr) / std::log (lastBand ? 1.6f : 2.0f), 0.0f, 1.0f);
                 target = dbToGain (-depthDb * amt);
             }
             if (target < g - 1.0e-4f) { g = target + (g - target) * att; hold = 2 * D; }
@@ -435,7 +464,8 @@ public:
                 const float db = gainToDb (g);
                 if (std::abs (db - lastDb) > 0.01f)
                 {
-                    shelf = makeSvf (LowShelf, fs, lastF * 1.5f, 0.5 * db, 0.70710678);
+                    shelf = lastBand ? makeSvf (Bell, fs, lastF, 0.5 * db, qForWidth (lastW))
+                                     : makeSvf (LowShelf, fs, lastF * 1.5f, 0.5 * db, 0.70710678);
                     lastDb = db;
                 }
             }
@@ -454,12 +484,14 @@ public:
     }
 
     std::atomic<float> reduction { 0.0f }, lowDb { -100.0f }, highDb { -100.0f }, thresholdRatioDb { 0.0f };
+    float maxRatio = 0;                    // diagnostic
+    static constexpr float bandThrScale = 1.8f;
 
 private:
     struct Chan { Biquad a, b, ha, hb; SvfState s1, s2; std::vector<float> x; };
     double fs = 48000;
     int D = 144, R = 256, mask = 255; int64_t head = 0;
-    float g = 1, envL = 0, envR = 0, lastF = -1, lastDb = 1.0e9f; int hold = 0;
+    float g = 1, envL = 0, envR = 0, lastF = -1, lastDb = 1.0e9f, lastW = -1; int hold = 0; bool lastBand = false;
     SvfCoefs shelf = makeSvf (LowShelf, 48000.0, 140.0, 0.0, 0.70710678);
     std::vector<Chan> ch;
 };
@@ -553,6 +585,8 @@ public:
         if (s.allButtons) { ratio = 20.0f; knee = std::max (knee, 3.0f); extra = 1.0f; }
         float makeup = s.makeup;
         if (s.autoMakeup) makeup += (-s.thresh) * (1.0f - 1.0f / ratio) * 0.35f;
+        const float sm = msCoef (20.0f, fs);
+        if (! started) { mkS = makeup; mixS = s.mix01; started = true; }
         float maxRed = 0, maxXg = -120.0f;
         for (int i = 0; i < n; ++i)
         {
@@ -574,9 +608,10 @@ public:
             y1 = std::max (xl, rel * y1 + (1 - rel) * xl);
             yl = att * yl + (1 - att) * y1;
             maxRed = std::max (maxRed, yl);
-            const float g = dbToGain (-yl + makeup);
-            const float dryG = (1.0f - s.mix01) * dbToGain (s.autoMakeup ? 0.0f : 0.0f);
-            for (int c = 0; c < nch; ++c) data[c][i] = data[c][i] * (s.mix01 * g + dryG);
+            mkS = glideTo (mkS, makeup, sm);              // zipper-free makeup / mix
+            mixS = glideTo (mixS, s.mix01, sm);
+            const float g = dbToGain (-yl + mkS);
+            for (int c = 0; c < nch; ++c) data[c][i] = data[c][i] * (mixS * g + (1.0f - mixS));
         }
         reduction.store (maxRed);
         sideDb.store (maxXg);
@@ -584,7 +619,7 @@ public:
     std::atomic<float> reduction { 0.0f }, sideDb { -100.0f };
 
 private:
-    double fs = 48000; std::vector<Biquad> sc; float y1 = 0, yl = 0, lastHpf = -1;
+    double fs = 48000; std::vector<Biquad> sc; float y1 = 0, yl = 0, lastHpf = -1, mkS = 0, mixS = 1; bool started = false;
 };
 
 //==============================================================================
@@ -618,6 +653,8 @@ public:
         const float relFast = msCoef (60.0f, fs);
         const float detRel = msCoef (8.0f, fs);
         const float chargeUp = msCoef (2500.0f, fs), chargeDown = msCoef (8000.0f, fs);
+        const float sm = msCoef (20.0f, fs);
+        if (! started) { gS = s.gainDb; mixS = s.mix01; started = true; }
         float maxRed = 0, maxXg = -120.0f;
         for (int i = 0; i < n; ++i)
         {
@@ -644,9 +681,11 @@ public:
             slow = target > slow ? att * slow + (1 - att) * target : relSlow * slow + (1 - relSlow) * target;
             const float gr = 0.55f * fast + 0.45f * slow;
             maxRed = std::max (maxRed, gr);
-            const float g = dbToGain (-gr + s.gainDb);
-            const float dg = (1.0f - s.mix01) * dbToGain (s.gainDb);
-            for (int c = 0; c < nch; ++c) data[c][i] *= (s.mix01 * g + dg);
+            gS = glideTo (gS, s.gainDb, sm);
+            mixS = glideTo (mixS, s.mix01, sm);
+            const float g = dbToGain (-gr + gS);
+            const float dg = (1.0f - mixS) * dbToGain (gS);
+            for (int c = 0; c < nch; ++c) data[c][i] *= (mixS * g + dg);
         }
         reduction.store (maxRed);
         sideDb.store (maxXg);
@@ -656,7 +695,7 @@ public:
 
 private:
     double fs = 48000; std::vector<Biquad> sc;
-    float fast = 0, slow = 0, charge = 0, env = 0, lastEmph = -1;
+    float fast = 0, slow = 0, charge = 0, env = 0, lastEmph = -1, gS = 0, mixS = 1; bool started = false;
 };
 
 } // namespace vr

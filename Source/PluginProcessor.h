@@ -1,9 +1,11 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <unordered_map>
 #include "Params.h"
 #include "DSP/DspCore.h"
 #include "DSP/DynamicEq.h"
 #include "DSP/SpectralRepair.h"
+#include "DSP/Glue.h"
 
 // Lock-free-ish scope buffer for the analyser (tearing is harmless for display)
 struct ScopeBuffer
@@ -28,7 +30,7 @@ struct ScopeBuffer
 // "tick" (~2.7 ms), read by the UI. Values are levels / reductions in dB.
 struct Monitor
 {
-    enum Module { Overall = 0, Hum, Click, Plosive, Noise, Background, Isolator, Breath, Verb, DeEss, Fet, Opto, Eq, kNum };
+    enum Module { Overall = 0, Hum, Click, Plosive, Noise, Background, Isolator, Breath, Verb, DeEss, Fet, Opto, Eq, Glue, kNum };
     static constexpr int kLen = 4096;      // ~11 s of history
     struct Track
     {
@@ -44,6 +46,20 @@ struct Monitor
 class VoxRehabProcessor : public juce::AudioProcessor
 {
 public:
+    // Re-orderable stages (Input is always first, Output always last)
+    enum Stage { StHum = 0, StClick, StPlosive, StSpectral, StDeEss, StFet, StOpto, StEq, StGlue, kStages };
+    using Order = std::array<int, kStages>;
+    static Order defaultOrder() { return { StHum, StClick, StPlosive, StSpectral, StDeEss, StFet, StOpto, StEq, StGlue }; }
+    static const char* stageName (int s);
+    Order getOrder() const { return unpack (packedOrder.load()); }
+    void setOrder (const Order& o) { if (isValid (o)) packedOrder.store (pack (o)); }
+    static bool isValid (const Order& o)
+    {
+        std::array<bool, kStages> seen {};
+        for (int v : o) { if (v < 0 || v >= kStages || seen[(size_t) v]) return false; seen[(size_t) v] = true; }
+        return true;
+    }
+
     VoxRehabProcessor();
     ~VoxRehabProcessor() override = default;
 
@@ -82,6 +98,7 @@ public:
     vr::FetCompressor fet;
     vr::OptoCompressor opto;
     vr::DynamicEq eq;
+    vr::Glue glue;
 
     ScopeBuffer scopeIn, scopeOut;
     Monitor monitor;
@@ -90,6 +107,10 @@ public:
     bool hasLearnedProfile() const { return spectral.learnedValid; }
 
 private:
+    static uint64_t pack (const Order& o) { uint64_t v = 0; for (int i = 0; i < kStages; ++i) v |= (uint64_t) o[(size_t) i] << (4 * i); return v; }
+    static Order unpack (uint64_t v) { Order o {}; for (int i = 0; i < kStages; ++i) o[(size_t) i] = (int) ((v >> (4 * i)) & 15); return o; }
+    std::atomic<uint64_t> packedOrder { pack (defaultOrder()) };
+
     void processChunk (float* const* ch, int nch, int n);
     void commitTick();
 
@@ -100,8 +121,12 @@ private:
     std::array<float, Monitor::kNum> accGr {}, accSide {}, accSide2 {};
     std::array<bool, Monitor::kNum> accEv {};
     double accCount = 0;
-    float pv (const char* id) const { return apvts.getRawParameterValue (id)->load(); }
-    float pv (const juce::String& id) const { return apvts.getRawParameterValue (id)->load(); }
+    // Parameter access on the audio thread: pointers resolved once in the constructor, so a read is a
+    // pointer-keyed hash lookup + atomic load (no string compares, no allocation).
+    std::unordered_map<const void*, std::atomic<float>*> paramPtr;
+    std::array<std::array<std::atomic<float>*, kEqFields>, 8> eqPtr {};
+    float pv (const char* id) const { return paramPtr.at (id)->load (std::memory_order_relaxed); }
+    float eqv (int band, int field) const { return eqPtr[(size_t) band][(size_t) field]->load (std::memory_order_relaxed); }
 
     double currentFs = 48000;
     int maxChunk = 512, latency = 0, currentProgram = 0;

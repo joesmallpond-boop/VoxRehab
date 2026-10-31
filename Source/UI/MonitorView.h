@@ -27,7 +27,7 @@ inline const ModuleInfo& moduleInfo (int m)
         { "De-Click", juce::Colour (0xfff08a5d), nullptr,
           "Markers = each click found. GR lane = how far the click band is dipped. Right: the repair shape at the last click." },
         { "De-Plosive", juce::Colour (0xffff6b6b), "low band (pop detector)",
-          "White = low-band burst level, dashed = voice body. When the low band jumps above the body the low shelf ducks - note it starts just before the pop (lookahead). Markers = pops caught." },
+          "White = pop-band level (below Freq, or the selected band in Band mode), dashed = voice body. When it jumps above the body the band ducks - note it starts just before the pop (lookahead). Markers = pops caught." },
         { "De-Noise", juce::Colour (0xff4fc3f7), nullptr,
           "GR lane = average noise reduction across the voice band. Right: reduction at each frequency right now (deepest where there is only noise)." },
         { "Background Remover", juce::Colour (0xff26c6da), nullptr,
@@ -46,6 +46,8 @@ inline const ModuleInfo& moduleInfo (int m)
           "Cell drive vs threshold (dashed). Note the slow, programme-dependent release in the GR lane." },
         { "Dynamic EQ", juce::Colour (0xff64ffda), nullptr,
           "GR lane = largest dynamic band movement. Right: the live EQ curve including dynamic bands." },
+        { "Glue / Console", juce::Colour (0xffd4a373), "glue detector",
+          "GR lane = bus 'glue' compression (ballistics depend on the character). Red = level held back. Right: the console / tape tone curve; Drive adds harmonics on top." },
     };
     return info[juce::jlimit (0, Monitor::kNum - 1, m)];
 }
@@ -293,6 +295,7 @@ private:
         {
             case Monitor::DeEss: return val (ids::de_thresh);
             case Monitor::Fet:   return val (ids::c_thresh);
+            case Monitor::Glue:  return val (ids::gl_on) > 0.5f && val (ids::gl_glue) > 0.1f ? -4.0f - 0.26f * val (ids::gl_glue) : -1000.0f;
             case Monitor::Opto:  return proc.monitor.tr[(size_t) m].side2[(size_t) (now & (Monitor::kLen - 1))];
             default:             return -1000.0f;
         }
@@ -355,7 +358,7 @@ private:
         for (int i = 0; i < P; ++i) db[(size_t) i] = responseAt (20.0 * std::pow (1000.0, i / (double) (P - 1)), fs, grHold);
 
         const bool momentary = module == Monitor::Click || module == Monitor::Plosive || module == Monitor::DeEss
-                            || module == Monitor::Fet || module == Monitor::Opto;
+                            || module == Monitor::Fet || module == Monitor::Opto || module == Monitor::Glue;
         if (momentary && grPeakView > 0.05f)
         {
             juce::Path pk;
@@ -438,8 +441,19 @@ private:
             }
             case Monitor::Plosive:
             {
-                const auto c = vr::makeSvf (vr::LowShelf, fs, val (dp_freq) * 1.5, -0.5 * gr, 0.70710678);
+                const auto c = val (dp_mode) > 0.5f
+                    ? vr::makeSvf (vr::Bell, fs, val (dp_freq), -0.5 * gr, vr::DePlosive::qForWidth (val (dp_width)))
+                    : vr::makeSvf (vr::LowShelf, fs, val (dp_freq) * 1.5, -0.5 * gr, 0.70710678);
                 return 2.0f * (float) juce::Decibels::gainToDecibels (vr::svfMagnitude (c, fs, f), -60.0);
+            }
+            case Monitor::Glue:
+            {
+                if (val (gl_on) < 0.5f) return 0.0f;
+                double m = 1.0;
+                for (auto& c : vr::Glue::toneFilters ((int) val (gl_mode), val (gl_color) * 0.01f, fs * vr::Glue::kOS))
+                    m *= vr::svfMagnitude (c, fs * vr::Glue::kOS, f);
+                const float mix = val (gl_mix) * 0.01f;
+                return (float) juce::Decibels::gainToDecibels (mix * m + (1.0 - mix), -60.0) - gr + val (gl_out);
             }
             case Monitor::Noise: case Monitor::Background: case Monitor::Isolator: case Monitor::Breath: case Monitor::Verb:
             {

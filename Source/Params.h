@@ -1,41 +1,103 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
 
+#define VR_IDS(X) \
+    X (in_gain) \
+    X (hpf_on) \
+    X (hpf_freq) \
+    X (hpf_slope) \
+    X (hum_on) \
+    X (hum_freq) \
+    X (hum_harm) \
+    X (hum_q) \
+    X (hum_depth) \
+    X (dc_on) \
+    X (dc_sens) \
+    X (dc_width) \
+    X (dc_focus) \
+    X (dc_depth) \
+    X (dp_on) \
+    X (dp_sens) \
+    X (dp_freq) \
+    X (dp_depth) \
+    X (dp_release) \
+    X (dp_mode) \
+    X (dp_width) \
+    X (dn_on) \
+    X (dn_amount) \
+    X (dn_reduction) \
+    X (dn_tilt) \
+    X (dn_mode) \
+    X (dn_learn) \
+    X (bg_on) \
+    X (bg_thresh) \
+    X (bg_depth) \
+    X (bg_release) \
+    X (bg_range) \
+    X (bg_amount) \
+    X (vi_on) \
+    X (vi_amount) \
+    X (vi_low) \
+    X (vi_high) \
+    X (vi_focus) \
+    X (br_on) \
+    X (br_thresh) \
+    X (br_reduce) \
+    X (dv_on) \
+    X (dv_amount) \
+    X (dv_decay) \
+    X (dv_early) \
+    X (dv_floor) \
+    X (sp_smooth) \
+    X (de_on) \
+    X (de_freq) \
+    X (de_thresh) \
+    X (de_range) \
+    X (de_release) \
+    X (de_mode) \
+    X (de_listen) \
+    X (c_on) \
+    X (c_thresh) \
+    X (c_ratio) \
+    X (c_knee) \
+    X (c_attack) \
+    X (c_release) \
+    X (c_makeup) \
+    X (c_auto) \
+    X (c_allbtn) \
+    X (c_mix) \
+    X (c_schpf) \
+    X (op_on) \
+    X (op_peak) \
+    X (op_gain) \
+    X (op_mode) \
+    X (op_emph) \
+    X (op_mix) \
+    X (gl_on) \
+    X (gl_mode) \
+    X (gl_drive) \
+    X (gl_color) \
+    X (gl_glue) \
+    X (gl_mix) \
+    X (gl_out) \
+    X (eq_on) \
+    X (out_gain) \
+    X (mix) \
+    X (delta)
+
 namespace ids
 {
-#define VR_ID(name) inline constexpr const char* name = #name;
-// input
-VR_ID (in_gain) VR_ID (hpf_on) VR_ID (hpf_freq) VR_ID (hpf_slope)
-// de-hum
-VR_ID (hum_on) VR_ID (hum_freq) VR_ID (hum_harm) VR_ID (hum_q) VR_ID (hum_depth)
-// de-click
-VR_ID (dc_on) VR_ID (dc_sens) VR_ID (dc_width) VR_ID (dc_focus) VR_ID (dc_depth)
-// de-plosive
-VR_ID (dp_on) VR_ID (dp_sens) VR_ID (dp_freq) VR_ID (dp_depth) VR_ID (dp_release)
-// de-noise
-VR_ID (dn_on) VR_ID (dn_amount) VR_ID (dn_reduction) VR_ID (dn_tilt) VR_ID (dn_mode) VR_ID (dn_learn)
-// background
-VR_ID (bg_on) VR_ID (bg_thresh) VR_ID (bg_depth) VR_ID (bg_release) VR_ID (bg_range) VR_ID (bg_amount)
-// voice isolate
-VR_ID (vi_on) VR_ID (vi_amount) VR_ID (vi_low) VR_ID (vi_high) VR_ID (vi_focus)
-// breath
-VR_ID (br_on) VR_ID (br_thresh) VR_ID (br_reduce)
-// de-verb
-VR_ID (dv_on) VR_ID (dv_amount) VR_ID (dv_decay) VR_ID (dv_early) VR_ID (dv_floor)
-// artifact control
-VR_ID (sp_smooth)
-// de-ess
-VR_ID (de_on) VR_ID (de_freq) VR_ID (de_thresh) VR_ID (de_range) VR_ID (de_release) VR_ID (de_mode) VR_ID (de_listen)
-// FET compressor
-VR_ID (c_on) VR_ID (c_thresh) VR_ID (c_ratio) VR_ID (c_knee) VR_ID (c_attack) VR_ID (c_release)
-VR_ID (c_makeup) VR_ID (c_auto) VR_ID (c_allbtn) VR_ID (c_mix) VR_ID (c_schpf)
-// opto compressor
-VR_ID (op_on) VR_ID (op_peak) VR_ID (op_gain) VR_ID (op_mode) VR_ID (op_emph) VR_ID (op_mix)
-// eq + output
-VR_ID (eq_on)
-VR_ID (out_gain) VR_ID (mix) VR_ID (delta)
-#undef VR_ID
+#define VR_DECL(name) inline constexpr const char* name = #name;
+VR_IDS (VR_DECL)
+#undef VR_DECL
+#define VR_ENTRY(name) name,
+inline constexpr const char* all[] = { VR_IDS (VR_ENTRY) };
+#undef VR_ENTRY
 } // namespace ids
+
+// EQ band fields, in order
+inline constexpr const char* eqFields[] = { "on", "type", "freq", "gain", "q", "dyn", "thresh", "ratio", "range", "attack", "release" };
+enum EqField { EqOn = 0, EqType, EqFreq, EqGain, EqQ, EqDyn, EqThresh, EqRatio, EqRange, EqAttack, EqRelease, kEqFields };
 
 // EQ band fields: on type freq gain q dyn thresh ratio range attack release
 inline juce::String eqId (int band, const char* field) { return "eq" + juce::String (band + 1) + "_" + field; }

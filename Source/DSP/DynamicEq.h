@@ -23,7 +23,7 @@ public:
         {
             st[(size_t) b].assign ((size_t) maxCh, {});
             det[(size_t) b].assign ((size_t) maxCh, {});
-            env[(size_t) b] = 0; offset[(size_t) b] = 0;
+            env[(size_t) b] = 0; offset[(size_t) b] = 0; glide[(size_t) b] = {};
             liveGain[(size_t) b].store (0.0f);
         }
     }
@@ -45,6 +45,7 @@ public:
             return;
         }
         constexpr int sub = 16;
+        glideK = 1.0f - std::exp (-(float) sub / (0.015f * (float) fs));
         for (int start = 0; start < n; start += sub)
         {
             const int len = std::min (sub, n - start);
@@ -54,8 +55,14 @@ public:
                 if (! bd.on) continue;
                 const bool canDyn = bd.dyn && (bd.type == Bell || bd.type == LowShelf || bd.type == HighShelf);
                 if (! canDyn) offset[(size_t) b] = 0;
-                const float effGain = bd.gain + offset[(size_t) b];
-                const auto c = makeSvf (bd.type, fs, bd.freq, effGain, bd.q);
+                // glide static settings (log-frequency / dB / log-Q) so knob moves never step
+                auto& gl = glide[(size_t) b];
+                const float k = gl.init ? glideK : 1.0f;
+                gl.lf += (std::log (bd.freq) - gl.lf) * k; gl.g += (bd.gain - gl.g) * k; gl.lq += (std::log (bd.q) - gl.lq) * k;
+                gl.init = true;
+                if (std::abs (gl.g - bd.gain) < 1.0e-4f) gl.g = bd.gain;
+                const float effGain = gl.g + offset[(size_t) b];
+                const auto c = makeSvf (bd.type, fs, std::exp (gl.lf), effGain, std::exp (gl.lq));
                 liveGain[(size_t) b].store (effGain);
                 if (canDyn)
                 {
@@ -96,5 +103,8 @@ private:
     double fs = 48000;
     std::array<std::vector<SvfState>, kBands> st, det;
     std::array<float, kBands> env {}, offset {};
+    struct Glide { float lf = 0, g = 0, lq = 0; bool init = false; };
+    std::array<Glide, kBands> glide {};
+    float glideK = 0.1f;
 };
 } // namespace vr

@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 NAME="Vox Rehab"
 
 echo "==> Checking tools"

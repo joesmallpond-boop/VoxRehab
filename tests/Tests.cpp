@@ -28,7 +28,7 @@ struct Rig
     void allOff()
     {
         for (auto* id : { ids::hpf_on, ids::hum_on, ids::dc_on, ids::dp_on, ids::dn_on, ids::bg_on, ids::vi_on, ids::br_on,
-                          ids::dv_on, ids::de_on, ids::c_on, ids::op_on, ids::delta, ids::de_listen })
+                          ids::dv_on, ids::de_on, ids::c_on, ids::op_on, ids::delta, ids::de_listen, ids::gl_on })
             set (id, 0);
         for (int b = 0; b < 8; ++b) set (eqId (b, "on"), 0);
         set (ids::mix, 100); set (ids::out_gain, 0); set (ids::in_gain, 0);
@@ -130,6 +130,7 @@ int main()
         Rig r;
         r.p.setCurrentProgram (0);
         r.set (ids::op_on, 1); r.set (ids::dv_on, 1); r.set (ids::br_on, 1);
+        r.set (ids::gl_on, 1); r.set (ids::gl_mode, 3); r.set (ids::gl_glue, 45); r.set (ids::gl_drive, 40);
         r.set (eqId (4, "on"), 1); r.set (eqId (4, "freq"), 3000); r.set (eqId (4, "dyn"), 1); r.set (eqId (4, "gain"), 2);
         r.set (eqId (2, "on"), 1); r.set (eqId (2, "freq"), 300); r.set (eqId (2, "gain"), -3);
         std::unique_ptr<VoxRehabEditor> ed (dynamic_cast<VoxRehabEditor*> (r.p.createEditor()));
@@ -152,7 +153,8 @@ int main()
         }
         const std::pair<int, const char*> pages[] { { 1, "eq" }, { 100 + Monitor::DeEss, "deess" }, { 100 + Monitor::Plosive, "plosive" },
                                                     { 100 + Monitor::Noise, "denoise" }, { 100 + Monitor::Fet, "fet" },
-                                                    { 100 + Monitor::Click, "declick" }, { 100 + Monitor::Overall, "overall" } };
+                                                    { 100 + Monitor::Click, "declick" }, { 100 + Monitor::Overall, "overall" },
+                                                    { 100 + Monitor::Glue, "glue" } };
         for (auto& [id, name] : pages)
         {
             ed->selectView (id);
@@ -164,6 +166,37 @@ int main()
             juce::PNGImageFormat().writeImageToStream (img, os);
             std::printf ("wrote %s\n", f.getFullPathName().toRawUTF8());
         }
+        {
+            using VP = VoxRehabProcessor;
+            r.p.setOrder ({ VP::StGlue, VP::StHum, VP::StClick, VP::StPlosive, VP::StSpectral, VP::StFet, VP::StOpto, VP::StEq, VP::StDeEss });
+            ed->selectView (1);
+            ed->tickForTest();
+            juce::Desktop::getInstance().getAnimator().cancelAllAnimations (true);
+            auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
+            juce::File f = juce::File (dir).getChildFile ("reordered.png"); f.deleteFile();
+            juce::FileOutputStream os (f); juce::PNGImageFormat().writeImageToStream (img, os);
+        }
+        return 0;
+    }
+
+    if (std::getenv ("VR_FETPROBE"))
+    {
+        vr::FetCompressor f; f.prepare (48000, 2);
+        vr::FetCompressor::Settings st { true, 0.0f, 4.0f, 3.0f, 0.8f, 120.0f, 0.0f, false, false, 1.0f, 90.0f };
+        std::mt19937 rng (1); std::normal_distribution<float> d (0, 0.0316f);
+        std::vector<float> a (512), b (512), ia (512); float* chp[2] = { a.data(), b.data() };
+        double maxDev = 0; int devs = 0;
+        for (int blk = 0; blk < 200; ++blk)
+        {
+            for (int i = 0; i < 512; ++i) { ia[(size_t) i] = d (rng); a[(size_t) i] = b[(size_t) i] = ia[(size_t) i]; }
+            f.process (chp, 2, 512, st);
+            for (int i = 0; i < 512; ++i) if (a[(size_t) i] != ia[(size_t) i]) { ++devs; maxDev = std::max (maxDev, (double) std::abs (a[(size_t) i] / ia[(size_t) i] - 1)); }
+        }
+        Rig r; r.set (ids::c_on, 1); r.set (ids::c_thresh, 0); r.set (ids::c_auto, 0);
+        std::printf ("direct: changed %d max dev %.3g | params: mix %.9g makeup %.9g thresh %.9g auto %.9g knee %.9g\n", devs, maxDev,
+                     r.p.apvts.getRawParameterValue (ids::c_mix)->load(), r.p.apvts.getRawParameterValue (ids::c_makeup)->load(),
+                     r.p.apvts.getRawParameterValue (ids::c_thresh)->load(), r.p.apvts.getRawParameterValue (ids::c_auto)->load(),
+                     r.p.apvts.getRawParameterValue (ids::c_knee)->load());
         return 0;
     }
     if (std::getenv ("VR_PROBE"))
@@ -189,12 +222,86 @@ int main()
         for (size_t i = (size_t) L + 4096; i < in.size(); ++i) { const double d = out[i] - in[i - (size_t) L]; err += d * d; sig += (double) in[i - (size_t) L] * in[i - (size_t) L]; }
         const double nullDb = 10 * std::log10 (err / sig + 1e-30);
         std::printf ("  latency %d samples (%.1f ms); null depth %.1f dB\n", L, 1000.0 * L / FS, nullDb);
-        CHECK (nullDb < -100, "null depth should be below -100 dB");
+        CHECK (err == 0.0, "all modules off must be bit-exact");
         std::vector<float> imp ((size_t) (FS / 2), 0); imp[1000] = 1.0f;
         auto io = r.run (imp);
         size_t pk = 0; for (size_t i = 0; i < io.size(); ++i) if (std::abs (io[i]) > std::abs (io[pk])) pk = i;
         std::printf ("  impulse peak at %zu (expected %d)\n", pk, 1000 + L);
         CHECK ((int) pk == 1000 + L, "latency report must match measured delay");
+    }
+
+
+    // 1b. modules switched ON but idle must also be transparent
+    {
+        std::printf ("\n[1b] Modules on but idle (de-click, de-plosive, de-ess, FET above signal, EQ bands at 0 dB, spectral off)\n");
+        Rig r;
+        for (auto* id : { ids::dc_on, ids::dp_on, ids::de_on, ids::c_on }) r.set (id, 1);
+        r.set (ids::de_thresh, 0); r.set (ids::c_thresh, 0); r.set (ids::c_auto, 0);
+        for (int b = 0; b < 8; ++b) { r.set (eqId (b, "on"), 1); r.set (eqId (b, "gain"), 0); }
+        r.set (eqId (0, "on"), 0); r.set (eqId (7, "on"), 0);   // cut filters are never neutral
+        auto in = noise ((size_t) (3 * FS), -30, 8);
+        auto out = r.run (in);
+        const int L = r.latency();
+        double err = 0, sig = 0;
+        for (size_t i = (size_t) L + 8192; i < in.size(); ++i) { const double d = out[i] - in[i - (size_t) L]; err += d * d; sig += (double) in[i - (size_t) L] * in[i - (size_t) L]; }
+        std::printf ("  null depth %.1f dB%s\n", 10 * std::log10 (err / sig + 1e-30), err == 0 ? " (bit-exact)" : "");
+        CHECK (err / sig < 1e-12, "idle modules should null below -120 dB");
+        for (auto* id : { ids::dc_on, ids::dp_on, ids::de_on, ids::c_on, ids::eq_on })
+        {
+            Rig q; q.set (id, 1); q.set (ids::de_thresh, 0); q.set (ids::c_thresh, 0); q.set (ids::c_auto, 0);
+            if (id == ids::eq_on) for (int b = 1; b < 7; ++b) q.set (eqId (b, "on"), 1);
+            auto o2 = q.run (in); double e2 = 0;
+            for (size_t i = (size_t) L + 8192; i < in.size(); ++i) { const double d = o2[i] - in[i - (size_t) L]; e2 += d * d; }
+            std::printf ("    %-6s alone: %s\n", id, e2 == 0 ? "bit-exact" : juce::String (10 * std::log10 (e2 / sig), 1).toRawUTF8());
+        }
+    }
+
+    // 1c. chain reordering
+    {
+        std::printf ("\n[1c] Chain order\n");
+        Rig r;
+        auto o = VoxRehabProcessor::defaultOrder();
+        std::reverse (o.begin(), o.end());
+        r.p.setOrder (o);
+        auto in = noise ((size_t) FS, -20, 2);
+        auto out = r.run (in);
+        double err = 0; const int L = r.latency();
+        for (size_t i = (size_t) L; i < in.size(); ++i) err += std::abs (out[i] - in[i - (size_t) L]);
+        juce::MemoryBlock mb; r.p.getStateInformation (mb);
+        Rig r2; r2.p.setStateInformation (mb.getData(), (int) mb.getSize());
+        std::printf ("  reversed order: latency %d, bit-exact when idle: %s, restored from state: %s\n", L, err == 0 ? "yes" : "no",
+                     r2.p.getOrder() == o ? "yes" : "no");
+        CHECK (r2.p.getOrder() == o, "order must persist");
+        CHECK (! VoxRehabProcessor::isValid ({ 0, 0, 1, 2, 3, 4, 5, 6, 7 }), "invalid orders rejected");
+    }
+
+    // 1d. glue / console characters
+    {
+        std::printf ("\n[1d] Glue characters (1 kHz sine at -12 dBFS, drive 50%%, colour 0, glue 0)\n");
+        const char* names[] { "Vintage Tape", "Tube (Siemens)", "API Console", "Neve Console" };
+        for (int m = 0; m < 4; ++m)
+        {
+            Rig r; r.set (ids::gl_on, 1); r.set (ids::gl_mode, (float) m); r.set (ids::gl_drive, 50); r.set (ids::gl_color, 0); r.set (ids::gl_glue, 0);
+            std::vector<float> in ((size_t) FS);
+            for (size_t i = 0; i < in.size(); ++i) in[i] = 0.25f * (float) std::sin (2 * vr::kPi * 1000.0 * i / FS);
+            auto out = r.run (in);
+            auto harm = [&] (int h)
+            {
+                double re = 0, im = 0;
+                for (size_t i = (size_t) (0.5 * FS); i < out.size(); ++i)
+                { const double ph = 2 * vr::kPi * 1000.0 * h * i / FS; re += out[i] * std::cos (ph); im += out[i] * std::sin (ph); }
+                return 20 * std::log10 (std::sqrt (re * re + im * im) / (0.5 * FS) * 2 + 1e-12);
+            };
+            const double h1 = harm (1);
+            std::printf ("  %-15s fundamental %.1f dB | H2 %6.1f dB  H3 %6.1f dB  H5 %6.1f dB (rel.)\n", names[m], h1,
+                         harm (2) - h1, harm (3) - h1, harm (5) - h1);
+        }
+        Rig r; r.set (ids::gl_on, 1); r.set (ids::gl_drive, 0); r.set (ids::gl_color, 0); r.set (ids::gl_glue, 0); r.set (ids::gl_mix, 0);
+        std::vector<float> imp ((size_t) (FS / 2), 0); imp[1000] = 1.0f;
+        auto io = r.run (imp);
+        size_t pk = 0; for (size_t i = 0; i < io.size(); ++i) if (std::abs (io[i]) > std::abs (io[pk])) pk = i;
+        std::printf ("  glue on, mix 0: impulse at %zu (expected %d), value %.6f\n", pk, 1000 + r.latency(), io[pk]);
+        CHECK ((int) pk == 1000 + r.latency(), "glue latency must be compensated");
     }
 
     auto voice = makeVoice (20.0);
@@ -282,6 +389,36 @@ int main()
         double vs = 0, e = 0;
         for (size_t i = (size_t) FS; i + L < N; ++i) { vs += (double) voice.sig[i] * voice.sig[i]; const double d = o2[i + L] - voice.sig[i]; e += d * d; }
         std::printf ("  clean voice untouched: residual %.1f dB below signal\n", 10 * std::log10 (vs / e));
+    }
+
+
+    // 4b. de-plosive band mode (boomy 250 Hz thumps)
+    {
+        std::printf ("\n[4b] De-plosive Band mode (250 Hz boom bursts, band 250 Hz x 1.5 oct)\n");
+        std::vector<float> in = voice.sig, boom (N, 0);
+        for (int k = 0; k < 6; ++k)
+        {
+            const size_t p0 = (size_t) (FS * (0.3 + 2.2 * k * 1.5));
+            for (int j = 0; j < (int) (0.07 * FS); ++j)
+            {
+                const float t = j / (float) FS;
+                boom[p0 + (size_t) j] = 0.5f * std::exp (-t / 0.02f) * std::sin (2 * (float) vr::kPi * 250 * t) * std::min (1.0f, t / 0.002f);
+            }
+        }
+        for (size_t i = 0; i < N; ++i) in[i] += boom[i];
+        Rig r; r.set (ids::dp_on, 1); r.set (ids::dp_mode, 1); r.set (ids::dp_freq, 250); r.set (ids::dp_width, 1.5f); r.set (ids::dp_sens, 60);
+        auto out = r.run (in); const size_t L = (size_t) r.latency();
+        vr::Biquad b1, b2; b1.setBandpass (FS, 250, 2.0); b2.setBandpass (FS, 250, 2.0);
+        std::vector<float> bi (N), bo (N);
+        for (size_t i = 0; i < N; ++i) { bi[i] = b1.process (in[i]); bo[i] = b2.process (out[i]); }
+        double eI = 0, eO = 0;
+        for (size_t i = 0; i + L < N; ++i) if (boom[i] != 0) { eI += (double) bi[i] * bi[i]; eO += (double) bo[i + L] * bo[i + L]; }
+        std::printf ("  boom energy around 250 Hz: %.1f dB -> %.1f dB (cut %.1f dB), max ratio %.2f\n", 10 * std::log10 (eI), 10 * std::log10 (eO), 10 * std::log10 (eI / eO), r.p.dePlosive.maxRatio);
+        Rig r2; r2.set (ids::dp_on, 1); r2.set (ids::dp_mode, 1); r2.set (ids::dp_freq, 250); r2.set (ids::dp_width, 1.5f); r2.set (ids::dp_sens, 60);
+        auto o2 = r2.run (voice.sig);
+        double vs = 0, e = 0;
+        for (size_t i = (size_t) FS; i + L < N; ++i) { vs += (double) voice.sig[i] * voice.sig[i]; const double d = o2[i + L] - voice.sig[i]; e += d * d; }
+        std::printf ("  clean voice in band mode: residual %.1f dB below signal (max ratio %.2f)\n", 10 * std::log10 (vs / (e + 1e-30)), r2.p.dePlosive.maxRatio);
     }
 
     // 5. de-verb (Schroeder reverb, RT60 ~0.9 s)
@@ -395,7 +532,7 @@ int main()
         std::printf ("\n[8] Full chain stress (all modules on, random automation) + CPU\n");
         Rig r;
         for (auto* id : { ids::hpf_on, ids::hum_on, ids::dc_on, ids::dp_on, ids::dn_on, ids::bg_on, ids::vi_on, ids::br_on, ids::dv_on,
-                          ids::de_on, ids::c_on, ids::op_on })
+                          ids::de_on, ids::c_on, ids::op_on, ids::gl_on })
             r.set (id, 1);
         for (int b = 0; b < 8; ++b) { r.set (eqId (b, "on"), 1); r.set (eqId (b, "dyn"), b % 2); }
         auto nz = noise (N, -45, 5);

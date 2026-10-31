@@ -112,6 +112,9 @@ public:
         slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
         slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 70, 14);
         slider.setColour (juce::Slider::rotarySliderFillColourId, accent);
+        slider.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+        slider.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
+        slider.setColour (juce::Slider::textBoxTextColourId, col::text);
         slider.setRotaryParameters (juce::MathConstants<float>::pi * 1.25f, juce::MathConstants<float>::pi * 2.75f, true);
         slider.setVelocityBasedMode (false);
         slider.setMouseDragSensitivity (220);
@@ -219,8 +222,34 @@ public:
     }
 
     std::function<void()> onTitleClick;           // click the header to open this module in the monitor
-    bool monitored = false;
-    void mouseDown (const juce::MouseEvent& e) override { if (e.y < 26 && onTitleClick) onTitleClick(); }
+    std::function<void (juce::Point<float>)> onDragMove;   // drag by the header to move the module in the chain
+    std::function<void (juce::Point<float>)> onDragEnd;
+    bool monitored = false, draggable = false;
+    int stepNumber = 0;                           // position in the processing chain (0 = none)
+
+    void mouseDown (const juce::MouseEvent& e) override { pressedHeader = e.y < 26; dragging = false; }
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (! pressedHeader || ! draggable) return;
+        if (! dragging && e.getDistanceFromDragStart() < 6) return;
+        if (! dragging) { dragging = true; setAlpha (0.55f); setMouseCursor (juce::MouseCursor::DraggingHandCursor); }
+        if (onDragMove && getParentComponent() != nullptr) onDragMove (e.getEventRelativeTo (getParentComponent()).position);
+    }
+    void mouseUp (const juce::MouseEvent& e) override
+    {
+        if (dragging)
+        {
+            dragging = false; setAlpha (1.0f); setMouseCursor (juce::MouseCursor::NormalCursor); updateEnabled();
+            if (onDragEnd && getParentComponent() != nullptr) onDragEnd (e.getEventRelativeTo (getParentComponent()).position);
+        }
+        else if (pressedHeader && e.y < 26 && onTitleClick) onTitleClick();
+        pressedHeader = false;
+    }
+    void mouseMove (const juce::MouseEvent& e) override
+    {
+        setMouseCursor (e.y < 26 && draggable ? juce::MouseCursor::DraggingHandCursor
+                                              : (e.y < 26 && onTitleClick ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor));
+    }
     std::function<float()> meter;                 // dB of reduction (>= 0)
     std::function<juce::String()> statusText;     // optional extra readout in header
     float meterRangeDb = 24.0f;
@@ -246,13 +275,38 @@ public:
 
         auto head = getLocalBounds().removeFromTop (26).reduced (10, 0);
         if (hasPower) head.removeFromLeft (20);
-        g.setColour (on ? accent : col::dim);
-        g.setFont (font (12.0f, true));
-        g.drawText (title, head, juce::Justification::centredLeft);
-
+        if (stepNumber > 0)
+        {
+            auto b = head.removeFromLeft (18).withSizeKeepingCentre (16, 14).toFloat();
+            g.setColour (col::border.brighter (0.15f));
+            g.fillRoundedRectangle (b, 3.0f);
+            g.setColour (col::text);
+            g.setFont (font (9.5f, true));
+            g.drawText (juce::String (stepNumber), b, juce::Justification::centred);
+            head.removeFromLeft (4);
+        }
+        if (draggable)
+        {
+            // grip dots on the right of the header
+            auto gr = getLocalBounds().removeFromTop (26).removeFromRight (16).withSizeKeepingCentre (6, 10).toFloat();
+            g.setColour (col::dim.withAlpha (0.6f));
+            for (int yy = 0; yy < 3; ++yy) for (int xx = 0; xx < 2; ++xx)
+                g.fillEllipse (gr.getX() + xx * 4.0f, gr.getY() + yy * 4.0f, 2.0f, 2.0f);
+            head.removeFromRight (12);
+        }
+        juce::Rectangle<int> meterR, statusR;
         if (meter)
         {
-            auto mr = head.removeFromRight (juce::jmin (90, head.getWidth() / 3)).withSizeKeepingCentre (juce::jmin (90, head.getWidth() / 3), 6).toFloat();
+            const int mw = juce::jmin (90, head.getWidth() / 4);
+            meterR = head.removeFromRight (mw);
+            if (statusText) statusR = head.removeFromRight (juce::jmin (84, head.getWidth() / 3));
+        }
+        g.setColour (on ? accent : col::dim);
+        g.setFont (font (12.0f, true));
+        g.drawFittedText (title, head, juce::Justification::centredLeft, 1, 0.85f);
+        if (meter)
+        {
+            auto mr = meterR.withSizeKeepingCentre (meterR.getWidth(), 6).toFloat();
             g.setColour (col::bg);
             g.fillRoundedRectangle (mr, 3.0f);
             const float v = on ? juce::jlimit (0.0f, 1.0f, meter() / meterRangeDb) : 0.0f;
@@ -262,7 +316,7 @@ public:
             {
                 g.setColour (col::dim);
                 g.setFont (font (10.0f));
-                g.drawText (statusText(), head.removeFromRight (90).withTrimmedRight (6), juce::Justification::centredRight);
+                g.drawText (statusText(), statusR.withTrimmedRight (6), juce::Justification::centredRight);
             }
         }
         if (paintExtra) paintExtra (g, extraArea);
@@ -274,6 +328,7 @@ public:
         auto head = r.removeFromTop (22);
         if (hasPower) power.setBounds (head.removeFromLeft (20).reduced (1));
         if (reservedRight > 0) extraArea = r.removeFromRight (reservedRight);
+        if (reservedRight < 0) { extraArea = r; return; }
         if (combos.size() + toggles.size() > 0)
         {
             auto row = r.removeFromBottom (22);
@@ -311,6 +366,7 @@ private:
     PowerButton power;
     bool hasPower = false;
     juce::Rectangle<int> extraArea;
+    bool pressedHeader = false, dragging = false;
     std::unique_ptr<APVTS::ButtonAttachment> powerAtt;
     juce::OwnedArray<APVTS::ComboBoxAttachment> comboAtts;
     juce::OwnedArray<APVTS::ButtonAttachment> toggleAtts;

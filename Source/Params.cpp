@@ -15,8 +15,9 @@ struct Builder
 
     void f (const String& id, const String& name, float lo, float hi, float def, float centre, const String& unit, int decimals = 1)
     {
-        NormalisableRange<float> r (lo, hi);
-        if (centre > lo && centre < hi) r.setSkewForCentre (centre);
+        // dB controls snap to a 0.01 dB grid so values like 0 dB are stored exactly (bit-exact unity gain)
+        NormalisableRange<float> r (lo, hi, (unit == "dB" || unit == "dB/oct") ? 0.01f : 0.0f);
+        if (centre != 0.0f && centre > lo && centre < hi) r.setSkewForCentre (centre);
         auto attrs = AudioParameterFloatAttributes().withLabel (unit).withStringFromValueFunction (
             [unit, decimals] (float v, int)
             {
@@ -65,9 +66,11 @@ AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     // DE-PLOSIVE
     p.b (ids::dp_on, "De-Plosive On", true);
     p.f (ids::dp_sens, "Plosive Sensitivity", 0, 100, 50, 0, "%");
-    p.f (ids::dp_freq, "Plosive Freq", 60, 300, 140, 130, "Hz");
+    p.f (ids::dp_freq, "Plosive Freq", 40, 1200, 140, 180, "Hz");
     p.f (ids::dp_depth, "Plosive Depth", 0, 36, 18, 0, "dB");
     p.f (ids::dp_release, "Plosive Release", 10, 300, 60, 60, "ms", 0);
+    p.c (ids::dp_mode, "Plosive Mode", { "Low Band", "Band" }, 0);
+    p.f (ids::dp_width, "Plosive Width", 0.3f, 4.0f, 1.5f, 1.2f, "oct", 2);
     // DE-NOISE
     p.b (ids::dn_on, "De-Noise On", true);
     p.f (ids::dn_amount, "Noise Sensitivity", 0, 100, 40, 0, "%");
@@ -127,6 +130,14 @@ AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     p.c (ids::op_mode, "Opto Mode", { "Compress", "Limit" }, 0);
     p.f (ids::op_emph, "Opto HF Emphasis", 0, 100, 30, 0, "%");
     p.f (ids::op_mix, "Opto Mix", 0, 100, 100, 0, "%");
+    // GLUE / CONSOLE
+    p.b (ids::gl_on, "Glue On", false);
+    p.c (ids::gl_mode, "Glue Character", { "Vintage Tape", "Tube (Siemens)", "API Console", "Neve Console" }, 0);
+    p.f (ids::gl_drive, "Glue Drive", 0, 100, 30, 0, "%");
+    p.f (ids::gl_color, "Glue Colour", 0, 100, 50, 0, "%");
+    p.f (ids::gl_glue, "Glue Amount", 0, 100, 30, 0, "%");
+    p.f (ids::gl_mix, "Glue Mix", 0, 100, 100, 0, "%");
+    p.f (ids::gl_out, "Glue Output", -12, 12, 0, 0, "dB");
     // EQ
     p.b (ids::eq_on, "EQ On", true);
     const float defF[8] { 40, 120, 300, 800, 2500, 5000, 10000, 18000 };

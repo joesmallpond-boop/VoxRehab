@@ -33,6 +33,11 @@ std::vector<Preset> makePresets()
                                { op_peak, 30 }, { dp_sens, 65 }, { de_thresh, -30 },
                                { eq (4, "on"), 1 }, { eq (4, "freq"), 3000 }, { eq (4, "gain"), 2 },
                                { eq (6, "on"), 1 }, { eq (6, "gain"), 3 } } },
+        { "Tape Glue", { { gl_on, 1 }, { gl_mode, 0 }, { gl_drive, 35 }, { gl_color, 55 }, { gl_glue, 35 } } },
+        { "Neve Warmth", { { gl_on, 1 }, { gl_mode, 3 }, { gl_drive, 40 }, { gl_color, 60 }, { gl_glue, 30 }, { op_on, 1 }, { op_peak, 30 } } },
+        { "API Punch", { { gl_on, 1 }, { gl_mode, 2 }, { gl_drive, 35 }, { gl_color, 50 }, { gl_glue, 40 }, { c_ratio, 6 } } },
+        { "Tube Console Smooth", { { gl_on, 1 }, { gl_mode, 1 }, { gl_drive, 40 }, { gl_color, 50 }, { gl_glue, 25 }, { op_on, 1 } } },
+        { "Boomy Plosives (band)", { { dp_mode, 1 }, { dp_freq, 220 }, { dp_width, 1.8f }, { dp_sens, 60 }, { dp_depth, 15 } } },
         { "Hum Kill (50 Hz)", { { hum_on, 1 }, { hum_freq, 0 } } },
         { "Hum Kill (60 Hz)", { { hum_on, 1 }, { hum_freq, 1 } } },
         { "Transparent (all off)", { { hpf_on, 0 }, { dc_on, 0 }, { dp_on, 0 }, { dn_on, 0 }, { de_on, 0 }, { c_on, 0 } } },
@@ -47,6 +52,10 @@ VoxRehabProcessor::VoxRehabProcessor()
                                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "VoxRehab", createParameterLayout())
 {
+    for (auto* id : ids::all) paramPtr[id] = apvts.getRawParameterValue (id);
+    for (int b = 0; b < 8; ++b)
+        for (int f = 0; f < kEqFields; ++f)
+            eqPtr[(size_t) b][(size_t) f] = apvts.getRawParameterValue (eqId (b, eqFields[f]));
 }
 
 bool VoxRehabProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -74,8 +83,9 @@ void VoxRehabProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     fet.prepare (sampleRate, nch);
     opto.prepare (sampleRate, nch);
     eq.prepare (sampleRate, nch);
+    glue.prepare (sampleRate, nch, maxChunk);
 
-    latency = deClick.getLatency() + dePlosive.getLatency() + spectral.getLatency();
+    latency = deClick.getLatency() + dePlosive.getLatency() + spectral.getLatency() + glue.getLatency();
     setLatencySamples (latency);
     {
         const float t = (float) tickSamples;
@@ -84,6 +94,7 @@ void VoxRehabProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
         lat (Monitor::Overall, latency);
         lat (Monitor::Click, deClick.getLatency());
         lat (Monitor::Plosive, dePlosive.getLatency());
+        lat (Monitor::Glue, glue.getLatency());
         for (int m : { (int) Monitor::Noise, (int) Monitor::Background, (int) Monitor::Isolator, (int) Monitor::Breath, (int) Monitor::Verb })
             lat (m, spectral.getLatency());
     }
@@ -176,91 +187,132 @@ void VoxRehabProcessor::processChunk (float* const* ch, int nch, int n)
     accCount += n;
     const double eIn = energy();
     input.process (ch, nch, n, pv (in_gain), pv (hpf_on) > 0.5f, pv (hpf_freq), pv (hpf_slope) > 0.5f);
-    const double e0 = energy();
-    deHum.process (ch, nch, n, pv (hum_on) > 0.5f, pv (hum_freq) > 0.5f ? 60.0f : 50.0f,
-                   (int) pv (hum_harm), pv (hum_q), pv (hum_depth));
-    const double e1 = energy();
-    stage (Monitor::Hum, e0, e1);
-    if (pv (hum_on) > 0.5f) gr (Monitor::Hum, (float) juce::jmax (0.0, 10.0 * std::log10 ((e0 + 1e-12) / (e1 + 1e-12))));
-    deClick.process (ch, nch, n, pv (dc_on) > 0.5f, pv (dc_sens) * 0.01f, pv (dc_width), pv (dc_focus), pv (dc_depth) * 0.01f);
-    const double e2 = energy();
-    stage (Monitor::Click, e1, e2);
-    gr (Monitor::Click, deClick.activity.load());
-    { const int c = deClick.clicks.load(); if (c != lastClicks) { accEv[Monitor::Click] = true; lastClicks = c; } }
-    dePlosive.process (ch, nch, n, pv (dp_on) > 0.5f, pv (dp_sens) * 0.01f, pv (dp_freq), pv (dp_depth), pv (dp_release));
 
-    const double e3 = energy();
-    stage (Monitor::Plosive, e2, e3);
+    auto order = getOrder();
+    if (! isValid (order)) order = defaultOrder();
+    for (int st : order)
     {
-        const float r = dePlosive.reduction.load();
-        gr (Monitor::Plosive, r);
-        side (Monitor::Plosive, dePlosive.lowDb.load(), dePlosive.highDb.load());
-        if (r > 1.0f && lastPlosGr <= 1.0f) accEv[Monitor::Plosive] = true;
-        lastPlosGr = r;
-    }
-    vr::SpectralRepair::Settings s;
-    s.dnOn = pv (dn_on) > 0.5f; s.dnAmount = pv (dn_amount) * 0.01f; s.dnReductionDb = pv (dn_reduction);
-    s.dnTilt = pv (dn_tilt); s.useLearned = pv (dn_mode) > 0.5f; s.learning = pv (dn_learn) > 0.5f;
-    s.bgOn = pv (bg_on) > 0.5f; s.bgThresh = pv (bg_thresh); s.bgDepthDb = pv (bg_depth); s.bgReleaseMs = pv (bg_release);
-    s.bgRangeDb = pv (bg_range); s.bgAmount = pv (bg_amount) * 0.01f;
-    s.viOn = pv (vi_on) > 0.5f; s.viAmount = pv (vi_amount) * 0.01f; s.viLow = pv (vi_low); s.viHigh = pv (vi_high);
-    s.viFocus = pv (vi_focus) * 0.01f;
-    s.brOn = pv (br_on) > 0.5f; s.brThreshDb = pv (br_thresh); s.brReduceDb = pv (br_reduce);
-    s.dvOn = pv (dv_on) > 0.5f; s.dvAmount = pv (dv_amount) * 0.01f; s.dvDecay = pv (dv_decay); s.dvEarlyMs = pv (dv_early);
-    s.dvFloorDb = pv (dv_floor);
-    s.smooth = pv (sp_smooth) * 0.01f;
-    spectral.process (ch, nch, n, s);
-
-    const double e4 = energy();
-    for (int m : { (int) Monitor::Noise, (int) Monitor::Background, (int) Monitor::Isolator, (int) Monitor::Breath, (int) Monitor::Verb })
-        stage (m, e3, e4);
-    gr (Monitor::Noise, s.dnOn ? spectral.mDn.load() : 0.0f);
-    gr (Monitor::Background, s.bgOn ? spectral.mBg.load() : 0.0f);
-    gr (Monitor::Isolator, s.viOn ? spectral.mVi.load() : 0.0f);
-    side (Monitor::Isolator, spectral.mConf.load() > 0.2f ? spectral.mPitch.load() : -120.0f);
-    gr (Monitor::Breath, s.brOn ? spectral.mBr.load() : 0.0f);
-    if (s.brOn && spectral.mBr.load() > 1.0f) accEv[Monitor::Breath] = true;
-    gr (Monitor::Verb, s.dvOn ? spectral.mDv.load() : 0.0f);
-    deEsser.process (ch, nch, n, pv (de_on) > 0.5f, pv (de_freq), pv (de_thresh), pv (de_range), pv (de_release),
-                     pv (de_mode) > 0.5f, pv (de_listen) > 0.5f);
-
-    const double e5 = energy();
-    stage (Monitor::DeEss, e4, e5);
-    gr (Monitor::DeEss, deEsser.reduction.load());
-    side (Monitor::DeEss, deEsser.sideDb.load());
-    vr::FetCompressor::Settings fs { pv (c_on) > 0.5f, pv (c_thresh), pv (c_ratio), pv (c_knee), pv (c_attack), pv (c_release),
-                                     pv (c_makeup), pv (c_auto) > 0.5f, pv (c_allbtn) > 0.5f, pv (c_mix) * 0.01f, pv (c_schpf) };
-    fet.process (ch, nch, n, fs);
-    const double e6 = energy();
-    stage (Monitor::Fet, e5, e6);
-    gr (Monitor::Fet, fet.reduction.load());
-    side (Monitor::Fet, fet.sideDb.load());
-    vr::OptoCompressor::Settings os { pv (op_on) > 0.5f, pv (op_peak) * 0.01f, pv (op_gain), pv (op_mode) > 0.5f,
-                                      pv (op_emph) * 0.01f, pv (op_mix) * 0.01f };
-    opto.process (ch, nch, n, os);
-
-    const double e7 = energy();
-    stage (Monitor::Opto, e6, e7);
-    gr (Monitor::Opto, opto.reduction.load());
-    side (Monitor::Opto, opto.sideDb.load(), opto.threshDb.load());
-    std::array<vr::DynamicEq::Band, 8> bands;
-    for (int b = 0; b < 8; ++b)
-    {
-        auto& bd = bands[(size_t) b];
-        bd.on = pv (eqId (b, "on")) > 0.5f; bd.type = (int) pv (eqId (b, "type"));
-        bd.freq = pv (eqId (b, "freq")); bd.gain = pv (eqId (b, "gain")); bd.q = pv (eqId (b, "q"));
-        bd.dyn = pv (eqId (b, "dyn")) > 0.5f; bd.thresh = pv (eqId (b, "thresh")); bd.ratio = pv (eqId (b, "ratio"));
-        bd.range = pv (eqId (b, "range")); bd.attack = pv (eqId (b, "attack")); bd.release = pv (eqId (b, "release"));
-    }
-    eq.process (ch, nch, n, bands, pv (eq_on) > 0.5f);
-    {
-        const double e8 = energy();
-        stage (Monitor::Eq, e7, e8);
-        float dynMax = 0;
-        for (int b = 0; b < 8; ++b)
-            if (bands[(size_t) b].on && bands[(size_t) b].dyn)
-                dynMax = juce::jmax (dynMax, std::abs (eq.liveGain[(size_t) b].load() - bands[(size_t) b].gain));
-        gr (Monitor::Eq, dynMax);
+        const double ePre = energy();
+        switch (st)
+        {
+            case StHum:
+            {
+                deHum.process (ch, nch, n, pv (hum_on) > 0.5f, pv (hum_freq) > 0.5f ? 60.0f : 50.0f,
+                               (int) pv (hum_harm), pv (hum_q), pv (hum_depth));
+                const double e = energy();
+                stage (Monitor::Hum, ePre, e);
+                if (pv (hum_on) > 0.5f) gr (Monitor::Hum, (float) juce::jmax (0.0, 10.0 * std::log10 ((ePre + 1e-12) / (e + 1e-12))));
+                break;
+            }
+            case StClick:
+            {
+                deClick.process (ch, nch, n, pv (dc_on) > 0.5f, pv (dc_sens) * 0.01f, pv (dc_width), pv (dc_focus), pv (dc_depth) * 0.01f);
+                stage (Monitor::Click, ePre, energy());
+                gr (Monitor::Click, deClick.activity.load());
+                const int c = deClick.clicks.load();
+                if (c != lastClicks) { accEv[Monitor::Click] = true; lastClicks = c; }
+                break;
+            }
+            case StPlosive:
+            {
+                dePlosive.process (ch, nch, n, pv (dp_on) > 0.5f, pv (dp_sens) * 0.01f, pv (dp_freq), pv (dp_depth), pv (dp_release),
+                                   pv (dp_mode) > 0.5f, pv (dp_width));
+                stage (Monitor::Plosive, ePre, energy());
+                const float r = dePlosive.reduction.load();
+                gr (Monitor::Plosive, r);
+                side (Monitor::Plosive, dePlosive.lowDb.load(), dePlosive.highDb.load());
+                if (r > 1.0f && lastPlosGr <= 1.0f) accEv[Monitor::Plosive] = true;
+                lastPlosGr = r;
+                break;
+            }
+            case StSpectral:
+            {
+                vr::SpectralRepair::Settings s;
+                s.dnOn = pv (dn_on) > 0.5f; s.dnAmount = pv (dn_amount) * 0.01f; s.dnReductionDb = pv (dn_reduction);
+                s.dnTilt = pv (dn_tilt); s.useLearned = pv (dn_mode) > 0.5f; s.learning = pv (dn_learn) > 0.5f;
+                s.bgOn = pv (bg_on) > 0.5f; s.bgThresh = pv (bg_thresh); s.bgDepthDb = pv (bg_depth); s.bgReleaseMs = pv (bg_release);
+                s.bgRangeDb = pv (bg_range); s.bgAmount = pv (bg_amount) * 0.01f;
+                s.viOn = pv (vi_on) > 0.5f; s.viAmount = pv (vi_amount) * 0.01f; s.viLow = pv (vi_low); s.viHigh = pv (vi_high);
+                s.viFocus = pv (vi_focus) * 0.01f;
+                s.brOn = pv (br_on) > 0.5f; s.brThreshDb = pv (br_thresh); s.brReduceDb = pv (br_reduce);
+                s.dvOn = pv (dv_on) > 0.5f; s.dvAmount = pv (dv_amount) * 0.01f; s.dvDecay = pv (dv_decay); s.dvEarlyMs = pv (dv_early);
+                s.dvFloorDb = pv (dv_floor);
+                s.smooth = pv (sp_smooth) * 0.01f;
+                spectral.process (ch, nch, n, s);
+                const double e = energy();
+                for (int m : { (int) Monitor::Noise, (int) Monitor::Background, (int) Monitor::Isolator, (int) Monitor::Breath, (int) Monitor::Verb })
+                    stage (m, ePre, e);
+                gr (Monitor::Noise, s.dnOn ? spectral.mDn.load() : 0.0f);
+                gr (Monitor::Background, s.bgOn ? spectral.mBg.load() : 0.0f);
+                gr (Monitor::Isolator, s.viOn ? spectral.mVi.load() : 0.0f);
+                side (Monitor::Isolator, spectral.mConf.load() > 0.2f ? spectral.mPitch.load() : -120.0f);
+                gr (Monitor::Breath, s.brOn ? spectral.mBr.load() : 0.0f);
+                if (s.brOn && spectral.mBr.load() > 1.0f) accEv[Monitor::Breath] = true;
+                gr (Monitor::Verb, s.dvOn ? spectral.mDv.load() : 0.0f);
+                break;
+            }
+            case StDeEss:
+            {
+                deEsser.process (ch, nch, n, pv (de_on) > 0.5f, pv (de_freq), pv (de_thresh), pv (de_range), pv (de_release),
+                                 pv (de_mode) > 0.5f, pv (de_listen) > 0.5f);
+                stage (Monitor::DeEss, ePre, energy());
+                gr (Monitor::DeEss, deEsser.reduction.load());
+                side (Monitor::DeEss, deEsser.sideDb.load());
+                break;
+            }
+            case StFet:
+            {
+                vr::FetCompressor::Settings fs { pv (c_on) > 0.5f, pv (c_thresh), pv (c_ratio), pv (c_knee), pv (c_attack), pv (c_release),
+                                                 pv (c_makeup), pv (c_auto) > 0.5f, pv (c_allbtn) > 0.5f, pv (c_mix) * 0.01f, pv (c_schpf) };
+                fet.process (ch, nch, n, fs);
+                stage (Monitor::Fet, ePre, energy());
+                gr (Monitor::Fet, fet.reduction.load());
+                side (Monitor::Fet, fet.sideDb.load());
+                break;
+            }
+            case StOpto:
+            {
+                vr::OptoCompressor::Settings os { pv (op_on) > 0.5f, pv (op_peak) * 0.01f, pv (op_gain), pv (op_mode) > 0.5f,
+                                                  pv (op_emph) * 0.01f, pv (op_mix) * 0.01f };
+                opto.process (ch, nch, n, os);
+                stage (Monitor::Opto, ePre, energy());
+                gr (Monitor::Opto, opto.reduction.load());
+                side (Monitor::Opto, opto.sideDb.load(), opto.threshDb.load());
+                break;
+            }
+            case StEq:
+            {
+                std::array<vr::DynamicEq::Band, 8> bands;
+                for (int b = 0; b < 8; ++b)
+                {
+                    auto& bd = bands[(size_t) b];
+                    bd.on = eqv (b, EqOn) > 0.5f; bd.type = (int) eqv (b, EqType);
+                    bd.freq = eqv (b, EqFreq); bd.gain = eqv (b, EqGain); bd.q = eqv (b, EqQ);
+                    bd.dyn = eqv (b, EqDyn) > 0.5f; bd.thresh = eqv (b, EqThresh); bd.ratio = eqv (b, EqRatio);
+                    bd.range = eqv (b, EqRange); bd.attack = eqv (b, EqAttack); bd.release = eqv (b, EqRelease);
+                }
+                eq.process (ch, nch, n, bands, pv (eq_on) > 0.5f);
+                stage (Monitor::Eq, ePre, energy());
+                float dynMax = 0;
+                for (int b = 0; b < 8; ++b)
+                    if (bands[(size_t) b].on && bands[(size_t) b].dyn)
+                        dynMax = juce::jmax (dynMax, std::abs (eq.liveGain[(size_t) b].load() - bands[(size_t) b].gain));
+                gr (Monitor::Eq, dynMax);
+                break;
+            }
+            case StGlue:
+            {
+                vr::Glue::Settings gs;
+                gs.on = pv (gl_on) > 0.5f; gs.mode = (int) pv (gl_mode); gs.drive01 = pv (gl_drive) * 0.01f;
+                gs.color01 = pv (gl_color) * 0.01f; gs.glue01 = pv (gl_glue) * 0.01f; gs.mix01 = pv (gl_mix) * 0.01f; gs.outDb = pv (gl_out);
+                glue.process (ch, nch, n, gs);
+                stage (Monitor::Glue, ePre, energy());
+                gr (Monitor::Glue, glue.reduction.load());
+                side (Monitor::Glue, glue.sideDb.load());
+                break;
+            }
+            default: break;
+        }
     }
 
     // ---- output: gain, mix, delta
@@ -288,6 +340,12 @@ void VoxRehabProcessor::processChunk (float* const* ch, int nch, int n)
     stage (Monitor::Overall, eIn, energy());
 }
 
+const char* VoxRehabProcessor::stageName (int st)
+{
+    static const char* n[kStages] { "hum", "click", "plosive", "noise/room", "de-ess", "FET", "opto", "EQ", "glue" };
+    return juce::isPositiveAndBelow (st, (int) kStages) ? n[st] : "?";
+}
+
 //==============================================================================
 int VoxRehabProcessor::getNumPrograms() { return (int) presets().size(); }
 const juce::String VoxRehabProcessor::getProgramName (int index)
@@ -311,6 +369,11 @@ void VoxRehabProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     auto state = apvts.copyState();
     state.setProperty ("program", currentProgram, nullptr);
+    {
+        juce::StringArray o;
+        for (int v : getOrder()) o.add (juce::String (v));
+        state.setProperty ("chainOrder", o.joinIntoString (","), nullptr);
+    }
     if (spectral.learnedValid)
     {
         juce::MemoryBlock mb (spectral.learned.data(), spectral.learned.size() * sizeof (float));
@@ -326,6 +389,13 @@ void VoxRehabProcessor::setStateInformation (const void* data, int sizeInBytes)
         auto tree = juce::ValueTree::fromXml (*xml);
         if (! tree.isValid()) return;
         currentProgram = (int) tree.getProperty ("program", 0);
+        {
+            const auto os = juce::StringArray::fromTokens (tree.getProperty ("chainOrder").toString(), ",", "");
+            Order o = defaultOrder();
+            if (os.size() == kStages) for (int i = 0; i < kStages; ++i) o[(size_t) i] = os[i].getIntValue();
+            setOrder (isValid (o) ? o : defaultOrder());
+            tree.removeProperty ("chainOrder", nullptr);
+        }
         const auto profile = tree.getProperty ("noiseProfile").toString();
         tree.removeProperty ("noiseProfile", nullptr);
         apvts.replaceState (tree);

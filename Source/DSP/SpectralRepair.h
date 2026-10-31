@@ -59,7 +59,7 @@ public:
         }
         learnAcc.assign ((size_t) bins, 0); learnFrames = 0; wasLearning = false;
         if ((int) learned.size() != bins) { learned.assign ((size_t) bins, 0); learnedValid = false; }
-        pos = 0; hopCount = 0;
+        pos = 0; hopCount = 0; running = false; warm = 0; fade = 0.0f;
         subLen = std::max (2, (int) std::round (0.19 / hopSec));
 
         for (int pt = 0; pt < kPts; ++pt)
@@ -98,24 +98,52 @@ public:
             lastTilt = s.dnTilt;
         }
 
+        // When no spectral module is on, skip the FFT entirely and pass an exact N-sample delay.
+        // Switching on/off crossfades (after a warm-up so the overlap-add buffer is full).
+        const bool want = s.dnOn || s.bgOn || s.viOn || s.brOn || s.dvOn || s.learning;
+        if (want && ! running)
+        {
+            running = true; warm = N; fade = 0.0f;
+            for (auto& c : ch) std::fill (c.out.begin(), c.out.end(), 0.0f);
+            hopCount = 0;
+        }
+        const float fadeStep = 1.0f / (float) hop;
         for (int i = 0; i < n; ++i)
         {
+            if (running)
+            {
+                if (warm > 0) --warm;
+                else fade = want ? std::min (1.0f, fade + fadeStep) : std::max (0.0f, fade - fadeStep);
+            }
             for (int c = 0; c < nch; ++c)
             {
                 auto& cs = ch[(size_t) c];
+                const float delayed = cs.in[(size_t) pos];          // x[t - N]: exact bypass
                 cs.in[(size_t) pos] = data[c][i];
-                data[c][i] = cs.out[(size_t) pos];
-                cs.out[(size_t) pos] = 0;
+                float y = delayed;
+                if (running)
+                {
+                    const float wet = cs.out[(size_t) pos];
+                    cs.out[(size_t) pos] = 0;
+                    if (fade >= 1.0f) y = wet;
+                    else if (fade > 0.0f) y = fade * wet + (1.0f - fade) * delayed;
+                }
+                data[c][i] = y;
             }
             pos = (pos + 1) & mask;
-            if (++hopCount == hop)
+            if (running && ++hopCount == hop)
             {
                 hopCount = 0;
                 for (int c = 0; c < nch; ++c) processFrame (ch[(size_t) c], s, c == 0);
                 if (s.learning) ++learnFrames;
             }
+            if (running && ! want && warm == 0 && fade <= 0.0f) running = false;
         }
+        if (! running)
+            for (auto* m : { &mDn, &mBg, &mVi, &mBr, &mDv }) m->store (0.0f);
     }
+
+    bool isRunning() const { return running; }
 
     // learned noise profile (persisted by the processor)
     std::vector<float> learned;
@@ -371,7 +399,7 @@ private:
     float hopSec = 0.01f, binHz = 23.4f, winSq = 1, olaScale = 0.5f, lastTilt = 1.0e9f;
     std::unique_ptr<juce::dsp::FFT> fft;
     std::vector<float> win, buf, P, G, Gtmp, tilt, learnAcc, cands;
-    int learnFrames = 0, subLen = 18; bool wasLearning = false;
+    int learnFrames = 0, subLen = 18, warm = 0; bool wasLearning = false, running = false; float fade = 0.0f;
     std::vector<Chan> ch;
     std::array<int, kPts> ptLo {}, ptHi {};
     std::array<std::vector<float>, kMasks> mg;
